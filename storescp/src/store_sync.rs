@@ -5,11 +5,15 @@ use dicom_dictionary_std::tags;
 use dicom_encoding::transfer_syntax::TransferSyntaxIndex;
 use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
-use dicom_ul::{Pdu, ServerAssociation, association::{Association, CloseSocket}, pdu::{PDataValueType, PresentationContextResultReason}};
+use dicom_ul::{
+    Pdu, ServerAssociation,
+    association::{Association, CloseSocket},
+    pdu::{PDataValueType, PresentationContextResultReason},
+};
 use snafu::{OptionExt, Report, ResultExt, Whatever};
 use tracing::{debug, info, warn};
 
-use crate::{create_cecho_response, create_cstore_response, transfer::ABSTRACT_SYNTAXES, App};
+use crate::{App, create_cecho_response, create_cstore_response, transfer::ABSTRACT_SYNTAXES};
 pub fn run_store_sync(scu_stream: TcpStream, args: &App) -> Result<(), Whatever> {
     let App {
         verbose,
@@ -21,10 +25,11 @@ pub fn run_store_sync(scu_stream: TcpStream, args: &App) -> Result<(), Whatever>
         out_dir,
         port: _,
         non_blocking: _,
+        #[cfg_attr(not(feature = "tls"), allow(unused_variables))]
         tls,
+        #[cfg_attr(not(feature = "tls"), allow(unused_variables))]
         tls_acceptor,
     } = &args;
-
 
     let mut options = dicom_ul::association::ServerAssociationOptions::new()
         .accept_any()
@@ -48,10 +53,14 @@ pub fn run_store_sync(scu_stream: TcpStream, args: &App) -> Result<(), Whatever>
     for uid in ABSTRACT_SYNTAXES {
         options = options.with_abstract_syntax(*uid);
     }
-    let (peer_addr, peer_title) = if tls.enabled {
-        let config = tls.server_config(tls_acceptor).whatever_context("Could not create TLS config")?;
+    let peer_addr = scu_stream.peer_addr().ok();
+
+    #[cfg(feature = "tls")]
+    if tls.enabled {
+        let config = tls
+            .server_config(tls_acceptor)
+            .whatever_context("Could not create TLS config")?;
         options = options.tls_config(config);
-        let peer_addr = scu_stream.peer_addr().ok();
         let association = options
             .establish_tls(scu_stream)
             .whatever_context("could not establish association")?;
@@ -64,7 +73,8 @@ pub fn run_store_sync(scu_stream: TcpStream, args: &App) -> Result<(), Whatever>
         }
         debug!(
             "#accepted_presentation_contexts={}, acceptor_max_pdu_length={}, requestor_max_pdu_length={}",
-            association.presentation_contexts()
+            association
+                .presentation_contexts()
                 .iter()
                 .filter(|pc| pc.reason == PresentationContextResultReason::Acceptance)
                 .count(),
@@ -73,47 +83,51 @@ pub fn run_store_sync(scu_stream: TcpStream, args: &App) -> Result<(), Whatever>
         );
         let peer_title = association.peer_ae_title().to_string();
         inner(association, *verbose, out_dir)?;
-        (peer_addr, peer_title)
-    } else {
-        let peer_addr = scu_stream.peer_addr().ok();
-        let association = options
-            .establish(scu_stream)
-            .whatever_context("could not establish association")?;
-        info!("New association from {}", association.peer_ae_title());
-        if args.verbose {
-            debug!(
-                "> Presentation contexts: {:?}",
-                association.presentation_contexts()
-            );
+
+        if let Some(peer_addr) = peer_addr {
+            info!("Dropping connection with {peer_title} ({peer_addr})");
+        } else {
+            info!("Dropping connection with {peer_title}");
         }
-        debug!(
-            "#accepted_presentation_contexts={}, acceptor_max_pdu_length={}, requestor_max_pdu_length={}",
-            association.presentation_contexts()
-                .iter()
-                .filter(|pc| pc.reason == PresentationContextResultReason::Acceptance)
-                .count(),
-            association.acceptor_max_pdu_length(),
-            association.requestor_max_pdu_length(),
-        );
-        let peer_title = association.peer_ae_title().to_string();
-        inner(association, *verbose, out_dir)?;
-        (peer_addr, peer_title)
-    };
-
-    if let Some(peer_addr) = peer_addr {
-        info!(
-            "Dropping connection with {} ({})",
-            peer_title,
-            peer_addr
-        );
-    } else {
-        info!("Dropping connection with {}", peer_title);
+        return Ok(());
     }
-    Ok(())
 
+    let association = options
+        .establish(scu_stream)
+        .whatever_context("could not establish association")?;
+    info!("New association from {}", association.peer_ae_title());
+    if args.verbose {
+        debug!(
+            "> Presentation contexts: {:?}",
+            association.presentation_contexts()
+        );
+    }
+    debug!(
+        "#accepted_presentation_contexts={}, acceptor_max_pdu_length={}, requestor_max_pdu_length={}",
+        association
+            .presentation_contexts()
+            .iter()
+            .filter(|pc| pc.reason == PresentationContextResultReason::Acceptance)
+            .count(),
+        association.acceptor_max_pdu_length(),
+        association.requestor_max_pdu_length(),
+    );
+    let peer_title = association.peer_ae_title().to_string();
+    inner(association, *verbose, out_dir)?;
+    if let Some(peer_addr) = peer_addr {
+        info!("Dropping connection with {peer_title} ({peer_addr})");
+    } else {
+        info!("Dropping connection with {peer_title}");
+    }
+
+    Ok(())
 }
 
-fn inner<T>(mut association: ServerAssociation<T>, verbose: bool, out_dir: &Path) -> Result<(), Whatever>
+fn inner<T>(
+    mut association: ServerAssociation<T>,
+    verbose: bool,
+    out_dir: &Path,
+) -> Result<(), Whatever>
 where
     T: std::io::Read + std::io::Write + CloseSocket,
 {
@@ -289,10 +303,7 @@ where
                                 snafu::Report::from_error(e)
                             );
                         });
-                        info!(
-                            "Released association with {}",
-                            association.peer_ae_title()
-                        );
+                        info!("Released association with {}", association.peer_ae_title());
                         break;
                     }
                     Pdu::AbortRQ { source } => {
@@ -317,5 +328,4 @@ where
         }
     }
     Ok(())
-
 }

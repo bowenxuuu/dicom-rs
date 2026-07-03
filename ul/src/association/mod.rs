@@ -85,14 +85,14 @@ pub enum Error {
     },
 
     /// failed to send association request
-    #[snafu(display("failed to send pdu: {}", source))]
+    #[snafu(display("failed to send pdu"))]
     SendPdu {
         #[snafu(backtrace)]
         source: crate::pdu::WriteError,
     },
 
     /// failed to receive association response
-    #[snafu(display("failed to receive pdu: {}", source))]
+    #[snafu(display("failed to receive pdu"))]
     ReceivePdu {
         #[snafu(backtrace)]
         source: crate::pdu::ReadError,
@@ -166,8 +166,8 @@ pub enum Error {
     #[non_exhaustive]
     SendTooLongPdu { length: usize, backtrace: Backtrace },
 
-    #[snafu(display("Connection closed by peer"))]
-    ConnectionClosed,
+    #[snafu(display("connection closed by peer"))]
+    ConnectionClosed { backtrace: Backtrace },
 
     /// TLS configuration is missing
     #[cfg(feature = "sync-tls")]
@@ -176,7 +176,7 @@ pub enum Error {
 
     /// Invalid server name for TLS
     #[cfg(feature = "sync-tls")]
-    #[snafu(display("Invalid server name for TLS connection"))]
+    #[snafu(display("invalid server name for TLS connection"))]
     InvalidServerName {
         source: rustls::pki_types::InvalidDnsNameError,
         backtrace: Backtrace,
@@ -184,11 +184,22 @@ pub enum Error {
 
     /// Failed to establish TLS connection
     #[cfg(feature = "sync-tls")]
-    #[snafu(display("Failed to establish TLS connection: {:?}", source))]
+    #[snafu(display("failed to establish TLS connection, does the remote support TLS?"))]
     TlsConnection {
         source: rustls::Error,
         backtrace: Backtrace,
     },
+
+    /// Failed to establish TLS connection
+    #[cfg(any(feature = "sync-tls", feature = "async-tls"))]
+    #[snafu(display("failed to handshake TLS connection, does the remote support TLS?"))]
+    TlsHandshake {
+        source: std::io::Error,
+        backtrace: Backtrace,
+    },
+    #[cfg(any(feature = "sync-tls", feature = "async-tls"))]
+    #[snafu(display("TLS not enabled, but peer seems to be sending TLS data"))]
+    TlsNotSupported,
 }
 /// Struct to hold negotiated options after association is accepted
 pub(crate) struct NegotiatedOptions {
@@ -227,14 +238,26 @@ impl CloseSocket for std::net::TcpStream {
 #[cfg(feature = "sync-tls")]
 impl CloseSocket for rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream> {
     fn close(&mut self) -> std::io::Result<()> {
-        self.get_mut().shutdown(std::net::Shutdown::Both)
+        // The peer may have already disconnected. On linux, calling `shutdown` once the peer
+        // disconnects is fine, but on Mac it returns a `NotConnected` error, ignore that
+        match self.get_mut().shutdown(std::net::Shutdown::Both) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotConnected => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
 #[cfg(feature = "sync-tls")]
 impl CloseSocket for rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream> {
     fn close(&mut self) -> std::io::Result<()> {
-        self.get_mut().shutdown(std::net::Shutdown::Both)
+        // The peer may have already disconnected. On linux, calling `shutdown` once the peer
+        // disconnects is fine, but on Mac it returns a `NotConnected` error, ignore that
+        match self.get_mut().shutdown(std::net::Shutdown::Both) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotConnected => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -283,16 +306,14 @@ pub trait Association {
     ///
     /// Returns `None` if that SOP class was rejected or not requested.
     fn extended_negotiation_for(&self, sop_class_uid: &str) -> Option<&[u8]> {
-        self.user_variables()
-            .iter()
-            .find_map(|uv| match uv {
-                UserVariableItem::SopClassExtendedNegotiationSubItem(uid, data)
-                    if uid == sop_class_uid =>
-                {
-                    Some(data.as_slice())
-                }
-                _ => None,
-            })
+        self.user_variables().iter().find_map(|uv| match uv {
+            UserVariableItem::SopClassExtendedNegotiationSubItem(uid, data)
+                if uid == sop_class_uid =>
+            {
+                Some(data.as_slice())
+            }
+            _ => None,
+        })
     }
 
     /// Roles that the Association-requestor may assume. Returns a

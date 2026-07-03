@@ -1,26 +1,26 @@
 use clap::Parser;
-use dicom_core::{dicom_value, header::Tag, DataElement, VR};
+use dicom_app_common::TlsOptions;
+use dicom_core::{DataElement, VR, dicom_value, header::Tag};
 use dicom_dictionary_std::{tags, uids};
-use dicom_encoding::transfer_syntax;
 use dicom_encoding::TransferSyntax;
-use dicom_object::{mem::InMemDicomObject, DefaultDicomObject, StandardDataDictionary};
+use dicom_encoding::transfer_syntax;
+use dicom_object::{DefaultDicomObject, StandardDataDictionary, mem::InMemDicomObject};
 use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 use dicom_ul::ClientAssociationOptions;
 use indicatif::{ProgressBar, ProgressStyle};
 use snafu::prelude::*;
 use snafu::{Report, Whatever};
-use tracing::debug;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn, Level};
+use tracing::debug;
+use tracing::{Level, error, info, warn};
 use tracing_subscriber::filter::EnvFilter;
 use transfer_syntax::TransferSyntaxIndex;
 use walkdir::WalkDir;
-use dicom_app_common::TlsOptions;
 
 mod store_async;
 mod store_sync;
@@ -104,7 +104,7 @@ struct App {
     concurrency: Option<usize>,
 
     #[command(flatten, next_help_heading = "TLS Options")]
-    tls: TlsOptions
+    tls: TlsOptions,
 }
 
 #[derive(Debug)]
@@ -179,7 +179,7 @@ enum Error {
     #[snafu(display("TLS error: {}", source))]
     Tls {
         source: dicom_app_common::TlsError,
-    }
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -193,13 +193,16 @@ pub fn get_scu_options<'a>(
     saml_assertion: Option<String>,
     jwt: Option<String>,
     presentation_contexts: &'a HashSet<(String, String)>,
-    tls_options: rustls::ClientConfig,
+    #[cfg(feature = "tls")] tls_options: rustls::ClientConfig,
 ) -> ClientAssociationOptions<'a> {
     let mut scu_init = ClientAssociationOptions::new()
         .calling_ae_title(calling_ae_title)
-        .max_pdu_length(max_pdu_length)
-        .server_name("localhost")
-        .tls_config(tls_options);
+        .max_pdu_length(max_pdu_length);
+
+    #[cfg(feature = "tls")]
+    {
+        scu_init = scu_init.server_name("localhost").tls_config(tls_options);
+    }
 
     for (storage_sop_class_uid, transfer_syntax) in presentation_contexts {
         scu_init = scu_init.with_presentation_context(storage_sop_class_uid, vec![transfer_syntax]);
@@ -239,7 +242,24 @@ fn main() {
             .with_env_filter(
                 EnvFilter::from_default_env()
                     .add_directive("dicom_app_common=info".parse().unwrap())
-                    .add_directive(if app.verbose { "dicom_storescu=debug".parse().unwrap() } else { "dicom_storescu=info".parse().unwrap() })
+                    .add_directive(
+                        if app.verbose {
+                            "dicom_storescu=debug"
+                        } else {
+                            "dicom_storescu=info"
+                        }
+                        .parse()
+                        .unwrap(),
+                    )
+                    .add_directive(
+                        if app.verbose {
+                            "dicom_app_common=debug"
+                        } else {
+                            "dicom_app_common=info"
+                        }
+                        .parse()
+                        .unwrap(),
+                    ),
             )
             .finish(),
     )
@@ -358,8 +378,16 @@ fn run(app: App) -> Result<(), Error> {
         never_transcode = true;
     }
     let tls_enabled = tls.enabled;
-    let config = tls.client_config()
-        .context(TlsSnafu)?;
+
+    #[cfg(not(feature = "tls"))]
+    if tls_enabled {
+        return Err(Error::Tls {
+            source: dicom_app_common::TlsError::TlsSupportNotAvailable,
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    let config = tls.client_config().context(TlsSnafu)?;
 
     if verbose {
         info!("Establishing association with '{}'...", &addr);
@@ -376,7 +404,8 @@ fn run(app: App) -> Result<(), Error> {
         saml_assertion,
         jwt,
         &presentation_contexts,
-        config
+        #[cfg(feature = "tls")]
+        config,
     );
     let progress_bar;
     if !verbose {
@@ -393,17 +422,39 @@ fn run(app: App) -> Result<(), Error> {
         progress_bar = None;
     }
 
+    #[cfg(feature = "tls")]
     if tls_enabled {
-        let scu = scu_options.establish_with_tls(&addr).map_err(Box::from).context(ScuSnafu)?;
-        store_sync::inner(scu, dicom_files, &progress_bar, fail_first, verbose, never_transcode, ignore_sop_class)?;
-
-    } else {
-        let scu = scu_options.establish_with(&addr).map_err(Box::from).context(ScuSnafu)?;
-        store_sync::inner(scu, dicom_files, &progress_bar, fail_first, verbose, never_transcode, ignore_sop_class)?;
+        let scu = scu_options
+            .establish_with_tls(&addr)
+            .map_err(Box::from)
+            .context(ScuSnafu)?;
+        store_sync::inner(
+            scu,
+            dicom_files,
+            &progress_bar,
+            fail_first,
+            verbose,
+            never_transcode,
+            ignore_sop_class,
+        )?;
+        return Ok(());
     }
+
+    let scu = scu_options
+        .establish_with(&addr)
+        .map_err(Box::from)
+        .context(ScuSnafu)?;
+    store_sync::inner(
+        scu,
+        dicom_files,
+        &progress_bar,
+        fail_first,
+        verbose,
+        never_transcode,
+        ignore_sop_class,
+    )?;
     Ok(())
 }
-
 
 async fn run_async() -> Result<(), Error> {
     let App {
@@ -422,7 +473,7 @@ async fn run_async() -> Result<(), Error> {
         saml_assertion,
         jwt,
         concurrency,
-        tls
+        tls,
     } = App::parse();
 
     // never transcode if the feature is disabled
@@ -431,8 +482,15 @@ async fn run_async() -> Result<(), Error> {
     }
 
     let tls_enabled = tls.enabled;
-    let config = tls.client_config()
-        .context(TlsSnafu)?;
+    #[cfg(not(feature = "tls"))]
+    if tls_enabled {
+        return Err(Error::Tls {
+            source: dicom_app_common::TlsError::TlsSupportNotAvailable,
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    let config = tls.client_config().context(TlsSnafu)?;
 
     if verbose {
         info!("Establishing association with '{}'...", &addr);
@@ -473,6 +531,7 @@ async fn run_async() -> Result<(), Error> {
         let password = password.clone();
         let called_ae_title = called_ae_title.clone();
         let calling_ae_title = calling_ae_title.clone();
+        #[cfg(feature = "tls")]
         let tls_config_clone = config.clone();
         tasks.spawn(async move {
             let scu_options = get_scu_options(
@@ -485,15 +544,17 @@ async fn run_async() -> Result<(), Error> {
                 saml_assertion,
                 jwt,
                 &pc,
-                tls_config_clone
+                #[cfg(feature = "tls")]
+                tls_config_clone,
             );
+            #[cfg(feature = "tls")]
             if tls_enabled {
                 let scu = scu_options
                     .establish_with_async_tls(&addr)
                     .await
                     .map_err(Box::from)
                     .context(ScuSnafu)?;
-                store_async::inner(
+                return store_async::inner(
                     scu,
                     d_files,
                     pbx,
@@ -502,31 +563,39 @@ async fn run_async() -> Result<(), Error> {
                     verbose,
                     ignore_sop_class,
                 )
-                .await
-            } else {
-                let scu = scu_options
-                    .establish_with_async(&addr)
-                    .await
-                    .map_err(Box::from)
-                    .context(ScuSnafu)?;
-                store_async::inner(
-                    scu,
-                    d_files,
-                    pbx,
-                    never_transcode,
-                    fail_first,
-                    verbose,
-                    ignore_sop_class,
-                )
-                .await
+                .await;
             }
+            let scu = scu_options
+                .establish_with_async(&addr)
+                .await
+                .map_err(Box::from)
+                .context(ScuSnafu)?;
+            store_async::inner(
+                scu,
+                d_files,
+                pbx,
+                never_transcode,
+                fail_first,
+                verbose,
+                ignore_sop_class,
+            )
+            .await
         });
     }
     while let Some(result) = tasks.join_next().await {
-        if let Err(e) = result {
-            error!("{}", Report::from_error(e));
-            if fail_first {
-                std::process::exit(-2);
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!("{}", Report::from_error(e));
+                if fail_first {
+                    std::process::exit(-2)
+                }
+            }
+            Err(e) => {
+                error!("{}", Report::from_error(e));
+                if fail_first {
+                    std::process::exit(-2)
+                }
             }
         }
     }
@@ -609,7 +678,6 @@ fn check_presentation_contexts(
     ignore_sop_class: bool,
     never_transcode: bool,
 ) -> Result<(dicom_ul::pdu::PresentationContextNegotiated, String), Error> {
-
     debug!("Testing file {file:?}");
 
     let file_ts = TransferSyntaxRegistry
@@ -619,9 +687,10 @@ fn check_presentation_contexts(
         })?;
 
     // Try to find an exact match for the file's transfer syntax first
-    let exact_match_pc = pcs.iter()
-            .filter(|pc| ignore_sop_class || pc.abstract_syntax == file.sop_class_uid)
-            .find(|pc| pc.transfer_syntax == file_ts.uid());
+    let exact_match_pc = pcs
+        .iter()
+        .filter(|pc| ignore_sop_class || pc.abstract_syntax == file.sop_class_uid)
+        .find(|pc| pc.transfer_syntax == file_ts.uid());
 
     if let Some(pc) = exact_match_pc {
         return Ok((pc.clone(), pc.transfer_syntax.clone()));

@@ -110,8 +110,8 @@
 
 use dicom_encoding::transfer_syntax::{AdapterFreeTransferSyntax as Ts, Codec};
 use lazy_static::lazy_static;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 
 pub use dicom_encoding::{TransferSyntax, TransferSyntaxIndex};
@@ -181,13 +181,19 @@ impl TransferSyntaxRegistryImpl {
                     // requirements, better keep it as a separate match arm for
                     // debugging purposes
                     (Codec::Dataset(None), Codec::EncapsulatedPixelData(_, _)) => {
-                        tracing::warn!("Inconsistent requirements for transfer syntax {}: `Dataset` cannot be replaced by `EncapsulatedPixelData`", ts.uid());
+                        tracing::warn!(
+                            "Inconsistent requirements for transfer syntax {}: `Dataset` cannot be replaced by `EncapsulatedPixelData`",
+                            ts.uid()
+                        );
                         false
                     }
                     // another weird one:
                     // the two codecs do not agree on requirements
                     (Codec::EncapsulatedPixelData(_, _), Codec::Dataset(None)) => {
-                        tracing::warn!("Inconsistent requirements for transfer syntax {}: `EncapsulatedPixelData` cannot be replaced by `Dataset`", ts.uid());
+                        tracing::warn!(
+                            "Inconsistent requirements for transfer syntax {}: `EncapsulatedPixelData` cannot be replaced by `Dataset`",
+                            ts.uid()
+                        );
                         false
                     }
                     // ignoring TS with less or equal implementation

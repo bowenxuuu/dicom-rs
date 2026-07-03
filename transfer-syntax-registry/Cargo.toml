@@ -1,6 +1,6 @@
 [package]
 name = "dicom-transfer-syntax-registry"
-version = "0.9.1"
+version = "0.10.0"
 authors = ["Eduardo Pinho <enet4mikeenet@gmail.com>"]
 description = "A registry of DICOM transfer syntaxes"
 edition = "2024"
@@ -57,15 +57,15 @@ charls = ["dep:charls"]
 charls-vcpkg = ["charls?/vcpkg"]
 
 # build OpenJPEG with multithreading,
-# implies "rayon"
-openjpeg-sys-threads = ["rayon", "jpeg2k?/threads"]
+# implies "openjpeg-sys" and "rayon"
+openjpeg-sys-threads = ["rayon", "openjpeg-sys", "jpeg2k?/threads"]
 
 # multithreading for JPEG XL encoding
 zune-jpegxl-threads = ["zune-jpegxl?/threads"]
 
 [dependencies]
-dicom-core = { path = "../core", version = "0.9.1" }
-dicom-encoding = { path = "../encoding", version = "0.9.1" }
+dicom-core = { path = "../core", version = "0.10" }
+dicom-encoding = { path = "../encoding", version = "0.10" }
 lazy_static = "1.2.0"
 byteordered = "0.6"
 tracing = "0.1.34"
